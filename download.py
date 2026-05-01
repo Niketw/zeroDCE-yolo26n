@@ -169,28 +169,42 @@ def _organise_files(cache_path: str):
     print("  STEP 2 / 5 — Organising images & labels …")
     print("=" * 70)
 
+    # --- Pre-Step: Copy any archives first so they can be extracted --- #
+    archive_exts = (".zip", ".tar", ".tar.gz", ".tgz")
+    archives = _find_files(cache_path, archive_exts)
+    if archives:
+        print(f"  Found {len(archives)} archive(s) in cache. Copying to dataset dir...")
+        for arch in archives:
+            dst = os.path.join(DATASET_DIR, os.path.basename(arch))
+            if not os.path.exists(dst):
+                print(f"  → Copying {os.path.basename(arch)}...")
+                shutil.copy2(arch, dst)
+    
+    # We must extract archives NOW so we can find the 100k images inside them
+    _cleanup_archives()
+
     # --- Images ---------------------------------------------------------- #
-    # Kaggle layout may vary; search for directories called "train", "val",
-    # "test" that sit somewhere under an "images" parent.
-    image_base_candidates = _find_dirs(cache_path, "images")
+    # Look for the images directory in BOTH cache and DATASET_DIR
+    image_base_candidates = _find_dirs(cache_path, "images") + _find_dirs(DATASET_DIR, "images")
     image_base = None
+    
+    # Filter candidates to prefer '100k' if it exists, ignoring '10k'
     for cand in image_base_candidates:
-        # Prefer the one that directly contains train/val/test subdirs
         children = set(os.listdir(cand))
-        if {"train", "val"}.issubset(children) or {"100k"}.issubset(children):
-            image_base = cand
+        if "100k" in children:
+            image_base = os.path.join(cand, "100k")
             break
+        if {"train", "val"}.issubset(children) and "10k" not in cand:
+            image_base = cand
+
     if image_base is None and image_base_candidates:
         image_base = image_base_candidates[0]
 
     if image_base is None:
-        print("  ✗ Could not locate an 'images' directory in the cache.")
+        print("  ✗ Could not locate an 'images' directory in the cache or extracted files.")
         sys.exit(1)
 
-    # BDD100K on Kaggle sometimes nests under images/100k/{train,val,test}
-    nested_100k = os.path.join(image_base, "100k")
-    if os.path.isdir(nested_100k):
-        image_base = nested_100k
+    print(f"  ✓ Using image base: {image_base}")
 
     for split in ("train", "val", "test"):
         src = os.path.join(image_base, split)
@@ -213,12 +227,23 @@ def _organise_files(cache_path: str):
     os.makedirs(os.path.join(yolo_labels_base, "train"), exist_ok=True)
     os.makedirs(os.path.join(yolo_labels_base, "val"), exist_ok=True)
 
-    # Find JSON label files in the Kaggle cache
-    json_files = _find_files(cache_path, (".json",))
+    # Find JSON label files in the Kaggle cache AND extracted dataset dir
+    json_files = _find_files(cache_path, (".json",)) + _find_files(DATASET_DIR, (".json",))
+    # Filter out anything already in _json_staging to avoid duplicate processing
+    json_files = [f for f in json_files if "_json_staging" not in f]
+    
     label_jsons = [f for f in json_files if "label" in f.lower() and "seg" not in f.lower()]
-    print(f"  Found {len(label_jsons)} label JSON file(s) in cache")
-
+    # De-duplicate by filename just in case
+    seen_jsons = set()
+    unique_label_jsons = []
     for jf in label_jsons:
+        if os.path.basename(jf) not in seen_jsons:
+            seen_jsons.add(os.path.basename(jf))
+            unique_label_jsons.append(jf)
+            
+    print(f"  Found {len(unique_label_jsons)} label JSON file(s)")
+
+    for jf in unique_label_jsons:
         fname = os.path.basename(jf).lower()
         if "train" in fname:
             dst = os.path.join(json_staging, "train", os.path.basename(jf))
@@ -235,7 +260,8 @@ def _organise_files(cache_path: str):
                 print(f"  ⚠  Could not copy {jf}: {e}")
 
     # Also copy label directory trees if they exist
-    label_dirs = _find_dirs(cache_path, "labels")
+    label_dirs = _find_dirs(cache_path, "labels") + _find_dirs(DATASET_DIR, "labels")
+    label_dirs = [ld for ld in label_dirs if "_json_staging" not in ld and "bdd100k/labels" not in ld]
     for ld in label_dirs:
         lower = ld.lower()
         if "seg" in lower or "drivable" in lower or "lane" in lower:
