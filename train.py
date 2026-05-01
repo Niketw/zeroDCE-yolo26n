@@ -143,14 +143,24 @@ def discord_watcher_thread(total_epochs=100):
 
 
 def get_latest_run_weights(project_dir="checkpoints"):
-    """Find the most recent last.pt across all runs in the project directory."""
-    search_pattern = os.path.join(project_dir, "*", "weights", "last.pt")
+    """Find the most recent checkpoint (.pt) across all runs in the project directory."""
+    search_pattern = os.path.join(project_dir, "*", "weights", "*.pt")
     runs = glob.glob(search_pattern)
-    if not runs:
+    
+    # Filter out best.pt as we want the latest training state (last.pt or epochX.pt)
+    valid_runs = [r for r in runs if not r.endswith("best.pt")]
+    
+    if not valid_runs:
         return None
+        
     # Sort by modification time, newest first
-    runs.sort(key=os.path.getmtime, reverse=True)
-    return runs[0]
+    valid_runs.sort(key=os.path.getmtime, reverse=True)
+    
+    print("\n  [Debug] Found the following checkpoints (newest first):")
+    for r in valid_runs[:5]:
+        print(f"    - {r}")
+        
+    return valid_runs[0]
 
 
 def main():
