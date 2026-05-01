@@ -26,10 +26,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from download import prepare_dataset
 from model import get_model
 
+CHECKPOINTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
 
 training_done = threading.Event()
 
-def get_latest_results_csv(project_dir="checkpoints"):
+def get_latest_results_csv(project_dir=CHECKPOINTS_DIR):
     search_pattern = os.path.join(project_dir, "*", "results.csv")
     csvs = glob.glob(search_pattern)
     if not csvs:
@@ -142,7 +143,7 @@ def discord_watcher_thread(total_epochs=100):
         pass
 
 
-def get_latest_run_weights(project_dir="checkpoints"):
+def get_latest_run_weights(project_dir=CHECKPOINTS_DIR):
     """Find the most recent checkpoint (.pt) across all runs in the project directory."""
     search_pattern = os.path.join(project_dir, "*", "weights", "*.pt")
     runs = glob.glob(search_pattern)
@@ -170,7 +171,7 @@ def main():
     yaml_path = prepare_dataset()
     print(f"  Dataset YAML : {yaml_path}")
 
-    last_pt = get_latest_run_weights("checkpoints")
+    last_pt = get_latest_run_weights(CHECKPOINTS_DIR)
 
     watcher = threading.Thread(target=discord_watcher_thread, args=(100,), daemon=True)
     watcher.start()
@@ -242,7 +243,7 @@ def main():
             batch=64,
             workers=16,
             nbs=64,
-            project="checkpoints",
+            project=CHECKPOINTS_DIR,
             name="yolo26n_run",
             device=device,
             save_period=5,
@@ -252,7 +253,7 @@ def main():
     watcher.join(timeout=5)
 
     print("\n✓ Training complete!")
-    print("  Best weights: ./checkpoints/yolo26n_run/weights/best.pt\n")
+    print(f"  Best weights: {os.path.join(CHECKPOINTS_DIR, 'yolo26n_run', 'weights', 'best.pt')}\n")
     return results
 
 
