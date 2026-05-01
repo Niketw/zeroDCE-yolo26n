@@ -210,7 +210,9 @@ def _organise_files(cache_path: str):
     label_dirs = _find_dirs(cache_path, "labels")
 
     # Copy any discovered JSON label files
-    labels_dst_base = os.path.join(DATASET_DIR, "bdd100k_labels")
+    # YOLO finds labels by replacing /images/ with /labels/ in the path,
+    # so labels must live at bdd100k/labels/{train,val}/
+    labels_dst_base = os.path.join(DATASET_DIR, "bdd100k", "labels")
     os.makedirs(os.path.join(labels_dst_base, "train"), exist_ok=True)
     os.makedirs(os.path.join(labels_dst_base, "val"), exist_ok=True)
 
@@ -400,7 +402,7 @@ def _convert_all_labels():
     print("  STEP 4 / 5 — Converting JSON labels to YOLO .txt …")
     print("=" * 70)
 
-    labels_base = os.path.join(DATASET_DIR, "bdd100k_labels")
+    labels_base = os.path.join(DATASET_DIR, "bdd100k", "labels")
 
     for split in ("train", "val"):
         split_dir = os.path.join(labels_base, split)
