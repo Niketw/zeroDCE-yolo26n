@@ -355,13 +355,17 @@ def _process_frame(args):
     return kept, skipped
 
 
-def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
+def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str,
+                           image_filter: set = None):
     """
     Parse a BDD100K JSON label file and write per-image YOLO .txt files
     using a ProcessPoolExecutor with NUM_WORKERS processes.
 
     Each line: class_id x_center y_center width height  (all normalised)
     Only classes present in CLASS_MAP are kept.
+
+    If *image_filter* is provided, only frames whose "name" is in that set
+    are processed (used when a single JSON contains both train+val labels).
     """
     print(f"\n  Converting {split_name} labels → YOLO format …")
     print(f"    Source : {json_path}")
@@ -389,7 +393,6 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
             print(f"    ⚠  Frame dump: {json.dumps(sample, indent=2)[:500]}")
     elif isinstance(data, dict):
         print(f"    JSON type  : dict (top-level keys: {list(data.keys())})")
-        # Some BDD100K versions wrap frames under a key
         for key in ("frames", "labels", "annotations", "images"):
             if key in data and isinstance(data[key], list):
                 print(f"    → Unwrapping data['{key}'] ({len(data[key])} items)")
@@ -398,6 +401,15 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
     else:
         print(f"    ⚠  Unexpected JSON root type: {type(data)}")
         return
+
+    # --- Filter by image names if requested ------------------------------
+    if image_filter:
+        before = len(data)
+        data = [f for f in data if f.get("name", "") in image_filter]
+        print(f"    Filtered: {before} → {len(data)} frames matching {split_name} images")
+        if not data:
+            print(f"    ⚠  No frames matched any images in this split")
+            return
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -426,7 +438,13 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
 
 
 def _convert_all_labels():
-    """Read JSON from _json_staging, write YOLO .txt to bdd100k/labels/."""
+    """Read JSON from _json_staging, write YOLO .txt to bdd100k/labels/.
+
+    For each split (train/val):
+      1. Try JSONs found in _json_staging/{split}/ (split-specific).
+      2. If none found, fall back to ALL JSONs and filter frames by
+         checking which image names exist in bdd100k/images/{split}/.
+    """
     print("\n" + "=" * 70)
     print("  STEP 4 / 5 — Converting JSON labels to YOLO .txt …")
     print("=" * 70)
@@ -434,24 +452,50 @@ def _convert_all_labels():
     json_staging = os.path.join(DATASET_DIR, "_json_staging")
     yolo_labels = os.path.join(DATASET_DIR, "bdd100k", "labels")
 
+    # Collect every JSON in the entire staging tree
+    all_jsons = _find_files(json_staging, (".json",))
+    print(f"  Total JSON files in staging: {len(all_jsons)}")
+    for j in all_jsons:
+        print(f"    → {j}")
+
+    if not all_jsons:
+        print("  ✗ No JSON label files found in staging! Check download.")
+        return
+
     for split in ("train", "val"):
-        src_dir = os.path.join(json_staging, split)
         out_dir = os.path.join(yolo_labels, split)
+        os.makedirs(out_dir, exist_ok=True)
 
-        if not os.path.isdir(src_dir):
-            print(f"  ⚠  JSON staging directory not found: {src_dir}")
-            continue
+        # Try split-specific JSONs first
+        split_dir = os.path.join(json_staging, split)
+        split_jsons = []
+        if os.path.isdir(split_dir):
+            split_jsons = [os.path.join(split_dir, f)
+                           for f in os.listdir(split_dir)
+                           if f.lower().endswith(".json")]
 
-        # Find JSON(s) in the staging directory
-        jsons = [f for f in os.listdir(src_dir) if f.lower().endswith(".json")]
-        print(f"  {split}: found {len(jsons)} JSON file(s) in {src_dir}")
-        if not jsons:
-            print(f"  ⚠  No JSON files found for {split} split")
-            continue
+        if split_jsons:
+            print(f"\n  {split}: found {len(split_jsons)} split-specific JSON(s)")
+            for jf in split_jsons:
+                _convert_json_to_yolo(jf, out_dir, split_name=f"{split}/{os.path.basename(jf)}")
+        else:
+            # Fallback: use ALL JSONs, filtering frames by image membership
+            img_dir = os.path.join(DATASET_DIR, "bdd100k", "images", split)
+            if not os.path.isdir(img_dir):
+                print(f"\n  ⚠  No images directory for {split}, skipping")
+                continue
 
-        for jf in jsons:
-            json_full = os.path.join(src_dir, jf)
-            _convert_json_to_yolo(json_full, out_dir, split_name=f"{split}/{jf}")
+            image_names = set(os.listdir(img_dir))
+            print(f"\n  ⚠  No {split}-specific JSON found — "
+                  f"trying all {len(all_jsons)} JSON(s) with image filter "
+                  f"({len(image_names)} {split} images)")
+
+            for jf in all_jsons:
+                _convert_json_to_yolo(
+                    jf, out_dir,
+                    split_name=f"{split}/{os.path.basename(jf)}",
+                    image_filter=image_names,
+                )
 
 
 # ---------------------------------------------------------------------------
