@@ -44,7 +44,7 @@ def discord_watcher_thread(total_epochs=100):
         
     try:
         requests.post(WEBHOOK_URL, json={
-            "content": f"🚀 **Training Started**: Multiprocessing DDP Run",
+            "content": f"🚀 **Training Started**",
             "embeds": [{
                 "title": "Monitor Active",
                 "description": f"Target: {total_epochs} epochs. Watching results.csv...",
