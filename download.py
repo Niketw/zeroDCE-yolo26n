@@ -528,19 +528,21 @@ def _generate_yaml():
 # ---------------------------------------------------------------------------
 
 def _labels_are_valid() -> bool:
-    """Check that at least some YOLO .txt label files have content."""
-    train_labels = os.path.join(DATASET_DIR, "bdd100k", "labels", "train")
-    if not os.path.isdir(train_labels):
-        return False
-    txt_files = [f for f in os.listdir(train_labels) if f.endswith(".txt")]
-    if not txt_files:
-        return False
-    # Spot-check first 20 files — at least 1 must be non-empty
-    non_empty = 0
-    for tf in txt_files[:20]:
-        if os.path.getsize(os.path.join(train_labels, tf)) > 0:
-            non_empty += 1
-    return non_empty > 0
+    """Check that BOTH train and val have non-empty YOLO .txt label files."""
+    for split in ("train", "val"):
+        split_dir = os.path.join(DATASET_DIR, "bdd100k", "labels", split)
+        if not os.path.isdir(split_dir):
+            return False
+        txt_files = [f for f in os.listdir(split_dir) if f.endswith(".txt")]
+        if not txt_files:
+            return False
+        # Spot-check first 20 files — at least 1 must be non-empty
+        non_empty = sum(1 for tf in txt_files[:20]
+                        if os.path.getsize(os.path.join(split_dir, tf)) > 0)
+        if non_empty == 0:
+            print(f"  ⚠  {split} labels: all checked .txt files are empty")
+            return False
+    return True
 
 
 def prepare_dataset():
