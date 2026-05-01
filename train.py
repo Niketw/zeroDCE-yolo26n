@@ -21,7 +21,7 @@ from download import prepare_dataset
 from model import get_model
 
 
-def get_latest_run_weights(project_dir="bdd_tuning"):
+def get_latest_run_weights(project_dir="checkpoints"):
     """Find the most recent last.pt across all runs in the project directory."""
     search_pattern = os.path.join(project_dir, "*", "weights", "last.pt")
     runs = glob.glob(search_pattern)
@@ -39,7 +39,7 @@ def main():
     yaml_path = prepare_dataset()
     print(f"  Dataset YAML : {yaml_path}")
 
-    last_pt = get_latest_run_weights("bdd_tuning")
+    last_pt = get_latest_run_weights("checkpoints")
 
     if last_pt:
         print("\n" + "=" * 70)
@@ -76,13 +76,14 @@ def main():
             batch=64,
             workers=16,
             nbs=64,
-            project="bdd_tuning",
+            project="checkpoints",
             name="yolo26n_run",
             device=device,
+            save_period=5,
         )
 
     print("\n✓ Training complete!")
-    print("  Best weights: ./bdd_tuning/yolo26n_run/weights/best.pt\n")
+    print("  Best weights: ./checkpoints/yolo26n_run/weights/best.pt\n")
     return results
 
 
