@@ -132,9 +132,10 @@ def _copy_single_item(args):
 
 def _copy_tree(src: str, dst: str, desc: str = ""):
     """
-    Copy an entire directory tree from *src* into *dst*, skipping
-    segmentation-related files/folders.  Uses a ThreadPool with
-    NUM_WORKERS threads for I/O-bound parallel copying.
+    Recursively find all files in *src* and copy them FLAT into *dst*.
+    Kaggle splits large folders (e.g. train into trainA, trainB). YOLO
+    requires images and labels to have matching relative structures. Since
+    we generate labels flat, we must flatten the images here.
     """
     if not os.path.isdir(src):
         print(f"  ⚠  Source not found, skipping: {src}")
@@ -142,15 +143,24 @@ def _copy_tree(src: str, dst: str, desc: str = ""):
 
     os.makedirs(dst, exist_ok=True)
 
-    # Build work list (skip segmentation artefacts)
+    # Build work list by walking the tree
     work = []
-    for item in os.listdir(src):
-        lower = item.lower()
-        if "seg" in lower or "drivable" in lower or "lane" in lower:
+    for root_dir, dirs, files in os.walk(src):
+        # Skip segmentation/drivable artefacts
+        lower_root = root_dir.lower()
+        if "seg" in lower_root or "drivable" in lower_root or "lane" in lower_root:
             continue
-        work.append((os.path.join(src, item), os.path.join(dst, item)))
+            
+        for item in files:
+            lower_item = item.lower()
+            if "seg" in lower_item or "drivable" in lower_item or "lane" in lower_item:
+                continue
+            
+            src_path = os.path.join(root_dir, item)
+            dst_path = os.path.join(dst, item)
+            work.append((src_path, dst_path))
 
-    print(f"  Copying {desc} ({len(work)} items) with {NUM_WORKERS} threads …")
+    print(f"  Copying and flattening {desc} ({len(work)} items) with {NUM_WORKERS} threads …")
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as pool:
         futures = {pool.submit(_copy_single_item, w): w for w in work}
         for fut in tqdm(as_completed(futures), total=len(futures),
