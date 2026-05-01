@@ -14,6 +14,8 @@ import glob
 import os
 import sys
 import requests
+import threading
+import time
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
@@ -25,85 +27,119 @@ from download import prepare_dataset
 from model import get_model
 
 
-def send_discord_start(trainer):
-    """
-    Callback function to send training start message.
-    Triggered on 'on_train_start'.
-    """
+training_done = threading.Event()
+
+def get_latest_results_csv(project_dir="checkpoints"):
+    search_pattern = os.path.join(project_dir, "*", "results.csv")
+    csvs = glob.glob(search_pattern)
+    if not csvs:
+        return None
+    csvs.sort(key=os.path.getmtime, reverse=True)
+    return csvs[0]
+
+def discord_watcher_thread(total_epochs=100):
     WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-    
     if not WEBHOOK_URL or WEBHOOK_URL == "YOUR_WEBHOOK_URL":
         return
         
     try:
-        embed = {
-            "title": "🚀 Training Started",
-            "description": f"Starting training for {trainer.epochs} epochs.",
-            "color": 3066993  # Green
-        }
+        requests.post(WEBHOOK_URL, json={
+            "content": f"🚀 **Training Started**: Multiprocessing DDP Run",
+            "embeds": [{
+                "title": "Monitor Active",
+                "description": f"Target: {total_epochs} epochs. Watching results.csv...",
+                "color": 3066993
+            }]
+        }, timeout=10)
+    except:
+        pass
         
-        data = {
-            "content": "Training started!",
-            "embeds": [embed]
-        }
-        
-        requests.post(WEBHOOK_URL, json=data, timeout=10)
-    except Exception as e:
-        print(f"Failed to send Discord webhook (start): {e}")
-
-
-def send_discord_stats(trainer):
-    """
-    Callback function to send training stats to a Discord webhook.
-    Triggered on 'on_train_epoch_end'.
-    """
-    WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+    last_processed_epoch = -1
+    last_csv_path = None
     
-    if not WEBHOOK_URL or WEBHOOK_URL == "YOUR_WEBHOOK_URL":
-        return
-        
-    try:
-        current_epoch = trainer.epoch + 1
-        total_epochs = trainer.epochs
-        
-        # Extract losses
-        if hasattr(trainer, 'tloss') and trainer.tloss is not None:
-            box_loss = float(trainer.tloss[0]) if len(trainer.tloss) > 0 else 0.0
-            cls_loss = float(trainer.tloss[1]) if len(trainer.tloss) > 1 else 0.0
-            dfl_loss = float(trainer.tloss[2]) if len(trainer.tloss) > 2 else 0.0
-        else:
-            box_loss = cls_loss = dfl_loss = 0.0
-
-        # Extract metrics
-        metrics = getattr(trainer, 'metrics', {})
-        map50 = metrics.get('metrics/mAP50(B)', 0.0)
-        map50_95 = metrics.get('metrics/mAP50-95(B)', 0.0)
-        
-        embed = {
-            "title": f"Epoch {current_epoch}/{total_epochs} Completed",
-            "color": 3447003,
-            "fields": [
-                {
-                    "name": "📉 Losses",
-                    "value": f"**Box:** {box_loss:.4f}\n**Class:** {cls_loss:.4f}\n**DFL:** {dfl_loss:.4f}",
-                    "inline": True
-                },
-                {
-                    "name": "📊 Metrics",
-                    "value": f"**mAP50:** {map50:.4f}\n**mAP50-95:** {map50_95:.4f}",
-                    "inline": True
+    def check_and_send():
+        nonlocal last_processed_epoch, last_csv_path
+        try:
+            csv_path = get_latest_results_csv()
+            if not csv_path: return
+            
+            if last_csv_path != csv_path:
+                last_csv_path = csv_path
+                last_processed_epoch = -1
+                
+            with open(csv_path, 'r') as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+            
+            if len(lines) <= 1: return
+            
+            header = [h.strip() for h in lines[0].split(',')]
+            last_row = [v.strip() for v in lines[-1].split(',')]
+            
+            if len(header) != len(last_row): return
+            
+            row_dict = dict(zip(header, last_row))
+            
+            current_epoch_str = row_dict.get('epoch', '')
+            if not current_epoch_str: return
+            
+            current_epoch = int(float(current_epoch_str))
+            
+            if current_epoch > last_processed_epoch:
+                box_loss = row_dict.get('train/box_loss', '0.0')
+                cls_loss = row_dict.get('train/cls_loss', '0.0')
+                dfl_loss = row_dict.get('train/dfl_loss', '0.0')
+                
+                map50 = row_dict.get('metrics/mAP50(B)', '0.0')
+                map50_95 = row_dict.get('metrics/mAP50-95(B)', '0.0')
+                
+                # Format to 4 decimal places if it's a number
+                def fmt(val):
+                    try: return f"{float(val):.4f}"
+                    except: return val
+                
+                embed = {
+                    "title": f"Epoch {current_epoch}/{total_epochs} Completed",
+                    "color": 3447003,
+                    "fields": [
+                        {
+                            "name": "📉 Losses",
+                            "value": f"**Box:** {fmt(box_loss)}\n**Class:** {fmt(cls_loss)}\n**DFL:** {fmt(dfl_loss)}",
+                            "inline": True
+                        },
+                        {
+                            "name": "📊 Metrics",
+                            "value": f"**mAP50:** {fmt(map50)}\n**mAP50-95:** {fmt(map50_95)}",
+                            "inline": True
+                        }
+                    ]
                 }
-            ]
-        }
+                
+                requests.post(WEBHOOK_URL, json={
+                    "content": "Epoch update!",
+                    "embeds": [embed]
+                }, timeout=10)
+                
+                last_processed_epoch = current_epoch
+        except Exception:
+            pass
+
+    # Wait for the first epoch/files to initialize
+    training_done.wait(10)
+    
+    while not training_done.is_set():
+        check_and_send()
+        training_done.wait(30)
         
-        data = {
-            "content": "Epoch update!",
-            "embeds": [embed]
-        }
-        
-        requests.post(WEBHOOK_URL, json=data, timeout=10)
-    except Exception as e:
-        print(f"Failed to send Discord webhook: {e}")
+    # Final check
+    check_and_send()
+    
+    # Send completion
+    try:
+        requests.post(WEBHOOK_URL, json={
+            "content": f"✅ **Training Process Completed!**"
+        }, timeout=10)
+    except:
+        pass
 
 
 def get_latest_run_weights(project_dir="checkpoints"):
@@ -125,6 +161,9 @@ def main():
     print(f"  Dataset YAML : {yaml_path}")
 
     last_pt = get_latest_run_weights("checkpoints")
+
+    watcher = threading.Thread(target=discord_watcher_thread, args=(100,), daemon=True)
+    watcher.start()
 
     if last_pt:
         print("\n" + "=" * 70)
@@ -168,16 +207,12 @@ def main():
         # We just need the device setup from get_model
         _, device = get_model()
         model = YOLO(last_pt)
-        model.add_callback("on_train_start", send_discord_start)
-        model.add_callback("on_train_epoch_end", send_discord_stats)
         results = model.train(resume=True, device=device)
     else:
         print("\n" + "=" * 70)
         print("  PHASE 2 — Model Initialisation")
         print("=" * 70)
         model, device = get_model()
-        model.add_callback("on_train_start", send_discord_start)
-        model.add_callback("on_train_epoch_end", send_discord_stats)
 
         print("\n" + "=" * 70)
         print("  PHASE 3 — Fine-Tuning YOLO26n on BDD100K")
@@ -202,6 +237,9 @@ def main():
             device=device,
             save_period=5,
         )
+
+    training_done.set()
+    watcher.join(timeout=5)
 
     print("\n✓ Training complete!")
     print("  Best weights: ./checkpoints/yolo26n_run/weights/best.pt\n")
