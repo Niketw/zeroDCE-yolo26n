@@ -33,7 +33,7 @@ def get_model():
         print(f"\n✓ CUDA detected  →  {num_gpus} GPU(s) available")
         for i in range(num_gpus):
             name = torch.cuda.get_device_name(i)
-            vram = torch.cuda.get_device_properties(i).total_mem / (1024 ** 3)
+            vram = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
             print(f"    GPU {i}: {name}  ({vram:.1f} GB VRAM)")
 
         if num_gpus > 1:
