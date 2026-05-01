@@ -14,6 +14,7 @@ datasets/
 bdd_vehicles.yaml
 # Ignore kaggle cache/configs if generated locally
 .kaggle/
+.kaggle_cache/
 kagglehub_cache/
 
 # =========================

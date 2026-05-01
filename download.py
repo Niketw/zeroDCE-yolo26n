@@ -92,14 +92,21 @@ def _find_dirs(root: str, target_name: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _download_dataset() -> str:
-    """Download BDD100K from Kaggle and return the local cache path."""
+    """Download BDD100K from Kaggle directly into the project directory."""
     print("\n" + "=" * 70)
     print("  STEP 1 / 5 — Downloading BDD100K from Kaggle …")
     print("=" * 70)
+
+    # Force kagglehub to cache inside the project directory
+    cache_dir = os.path.join(PROJECT_ROOT, ".kaggle_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ["KAGGLEHUB_CACHE"] = cache_dir
+    print(f"  → Download directory: {cache_dir}")
+
     try:
         import kagglehub
         path = kagglehub.dataset_download("solesensei/solesensei_bdd100k")
-        print(f"  ✓ Dataset cached at: {path}")
+        print(f"  ✓ Dataset downloaded to: {path}")
         return path
     except Exception as e:
         print(f"  ✗ Download failed: {e}")
