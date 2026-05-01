@@ -201,30 +201,31 @@ def _organise_files(cache_path: str):
         _copy_tree(src, dst, desc=f"{split} images")
 
     # --- Labels (JSON) --------------------------------------------------- #
-    # Look for JSON label files (bdd100k_labels_images_train.json, etc.)
+    # Stage JSON files in a SEPARATE directory so they don't pollute
+    # the YOLO labels path (bdd100k/labels/).  YOLO .txt output goes
+    # to bdd100k/labels/ later in Step 4.
+    json_staging = os.path.join(DATASET_DIR, "_json_staging")
+    os.makedirs(os.path.join(json_staging, "train"), exist_ok=True)
+    os.makedirs(os.path.join(json_staging, "val"), exist_ok=True)
+
+    # Create the YOLO labels directories (must exist for Step 4)
+    yolo_labels_base = os.path.join(DATASET_DIR, "bdd100k", "labels")
+    os.makedirs(os.path.join(yolo_labels_base, "train"), exist_ok=True)
+    os.makedirs(os.path.join(yolo_labels_base, "val"), exist_ok=True)
+
+    # Find JSON label files in the Kaggle cache
     json_files = _find_files(cache_path, (".json",))
-    # Filter to label JSONs (contain "label" in the name or path)
     label_jsons = [f for f in json_files if "label" in f.lower() and "seg" not in f.lower()]
-
-    # Also search for directories named "labels"
-    label_dirs = _find_dirs(cache_path, "labels")
-
-    # Copy any discovered JSON label files
-    # YOLO finds labels by replacing /images/ with /labels/ in the path,
-    # so labels must live at bdd100k/labels/{train,val}/
-    labels_dst_base = os.path.join(DATASET_DIR, "bdd100k", "labels")
-    os.makedirs(os.path.join(labels_dst_base, "train"), exist_ok=True)
-    os.makedirs(os.path.join(labels_dst_base, "val"), exist_ok=True)
+    print(f"  Found {len(label_jsons)} label JSON file(s) in cache")
 
     for jf in label_jsons:
         fname = os.path.basename(jf).lower()
         if "train" in fname:
-            dst = os.path.join(labels_dst_base, "train", os.path.basename(jf))
+            dst = os.path.join(json_staging, "train", os.path.basename(jf))
         elif "val" in fname:
-            dst = os.path.join(labels_dst_base, "val", os.path.basename(jf))
+            dst = os.path.join(json_staging, "val", os.path.basename(jf))
         else:
-            # Put in train by default (some datasets label both splits in one file)
-            dst = os.path.join(labels_dst_base, "train", os.path.basename(jf))
+            dst = os.path.join(json_staging, "train", os.path.basename(jf))
 
         if not os.path.exists(dst):
             try:
@@ -233,14 +234,15 @@ def _organise_files(cache_path: str):
             except Exception as e:
                 print(f"  ⚠  Could not copy {jf}: {e}")
 
-    # Copy label directory trees if they exist
+    # Also copy label directory trees if they exist
+    label_dirs = _find_dirs(cache_path, "labels")
     for ld in label_dirs:
         lower = ld.lower()
         if "seg" in lower or "drivable" in lower or "lane" in lower:
             continue
         for split in ("train", "val"):
             src_split = os.path.join(ld, split)
-            dst_split = os.path.join(labels_dst_base, split)
+            dst_split = os.path.join(json_staging, split)
             if os.path.isdir(src_split):
                 _copy_tree(src_split, dst_split, desc=f"{split} labels")
 
@@ -373,6 +375,30 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
         print(f"  ✗ Failed to load JSON: {e}")
         return
 
+    # --- Diagnostic: show the structure of the first frame ---------------
+    if isinstance(data, list) and len(data) > 0:
+        sample = data[0]
+        print(f"    JSON type  : list ({len(data)} frames)")
+        print(f"    Frame keys : {list(sample.keys())}")
+        sample_labels = sample.get("labels", None)
+        if sample_labels and len(sample_labels) > 0:
+            print(f"    Label keys : {list(sample_labels[0].keys())}")
+            print(f"    Sample cat : {sample_labels[0].get('category', 'N/A')}")
+        else:
+            print(f"    ⚠  First frame 'labels' field: {sample_labels}")
+            print(f"    ⚠  Frame dump: {json.dumps(sample, indent=2)[:500]}")
+    elif isinstance(data, dict):
+        print(f"    JSON type  : dict (top-level keys: {list(data.keys())})")
+        # Some BDD100K versions wrap frames under a key
+        for key in ("frames", "labels", "annotations", "images"):
+            if key in data and isinstance(data[key], list):
+                print(f"    → Unwrapping data['{key}'] ({len(data[key])} items)")
+                data = data[key]
+                break
+    else:
+        print(f"    ⚠  Unexpected JSON root type: {type(data)}")
+        return
+
     os.makedirs(output_dir, exist_ok=True)
 
     total_images = len(data)
@@ -395,34 +421,37 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
     print(f"  ✓ {split_name}: {total_boxes} boxes kept across {total_images} images "
           f"({skipped_boxes} boxes discarded).")
 
+    if total_boxes == 0:
+        print(f"  ⚠  WARNING: Zero boxes extracted! Check JSON structure above.")
+
 
 def _convert_all_labels():
-    """Run the JSON → YOLO conversion for train & val splits."""
+    """Read JSON from _json_staging, write YOLO .txt to bdd100k/labels/."""
     print("\n" + "=" * 70)
     print("  STEP 4 / 5 — Converting JSON labels to YOLO .txt …")
     print("=" * 70)
 
-    labels_base = os.path.join(DATASET_DIR, "bdd100k", "labels")
+    json_staging = os.path.join(DATASET_DIR, "_json_staging")
+    yolo_labels = os.path.join(DATASET_DIR, "bdd100k", "labels")
 
     for split in ("train", "val"):
-        split_dir = os.path.join(labels_base, split)
-        if not os.path.isdir(split_dir):
-            print(f"  ⚠  Label directory not found: {split_dir}")
+        src_dir = os.path.join(json_staging, split)
+        out_dir = os.path.join(yolo_labels, split)
+
+        if not os.path.isdir(src_dir):
+            print(f"  ⚠  JSON staging directory not found: {src_dir}")
             continue
 
-        # Find JSON(s) inside the split directory
-        jsons = [f for f in os.listdir(split_dir) if f.lower().endswith(".json")]
+        # Find JSON(s) in the staging directory
+        jsons = [f for f in os.listdir(src_dir) if f.lower().endswith(".json")]
+        print(f"  {split}: found {len(jsons)} JSON file(s) in {src_dir}")
         if not jsons:
-            print(f"  ⚠  No JSON files found in {split_dir}")
+            print(f"  ⚠  No JSON files found for {split} split")
             continue
-
-        # YOLO .txt output goes into the same folder that YOLO expects
-        # (next to images, but we place labels separately for clarity)
-        yolo_output = os.path.join(labels_base, split)
 
         for jf in jsons:
-            json_full = os.path.join(split_dir, jf)
-            _convert_json_to_yolo(json_full, yolo_output, split_name=f"{split}/{jf}")
+            json_full = os.path.join(src_dir, jf)
+            _convert_json_to_yolo(json_full, out_dir, split_name=f"{split}/{jf}")
 
 
 # ---------------------------------------------------------------------------
@@ -454,14 +483,34 @@ def _generate_yaml():
 # Public API
 # ---------------------------------------------------------------------------
 
+def _labels_are_valid() -> bool:
+    """Check that at least some YOLO .txt label files have content."""
+    train_labels = os.path.join(DATASET_DIR, "bdd100k", "labels", "train")
+    if not os.path.isdir(train_labels):
+        return False
+    txt_files = [f for f in os.listdir(train_labels) if f.endswith(".txt")]
+    if not txt_files:
+        return False
+    # Spot-check first 20 files — at least 1 must be non-empty
+    non_empty = 0
+    for tf in txt_files[:20]:
+        if os.path.getsize(os.path.join(train_labels, tf)) > 0:
+            non_empty += 1
+    return non_empty > 0
+
+
 def prepare_dataset():
     """
     End-to-end dataset preparation.
-    Exits early if bdd_vehicles.yaml already exists on disk.
+    Exits early only if the YAML exists AND labels are valid.
     """
-    if os.path.isfile(YAML_PATH):
-        print(f"\n✓ Dataset YAML already exists at {YAML_PATH} — skipping preparation.")
+    if os.path.isfile(YAML_PATH) and _labels_are_valid():
+        print(f"\n✓ Dataset YAML and labels already exist — skipping preparation.")
         return YAML_PATH
+
+    if os.path.isfile(YAML_PATH):
+        print(f"\n⚠  YAML exists but labels are missing/empty — re-running conversion …")
+        os.remove(YAML_PATH)
 
     print("\n" + "#" * 70)
     print("#  BDD100K → YOLO Dataset Preparation Pipeline")
