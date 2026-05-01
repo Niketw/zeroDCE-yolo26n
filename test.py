@@ -40,6 +40,7 @@ def main():
         source=source,
         conf=0.15,
         save=True,
+        device=0,
         project="bdd_tuning",
         name="yolo26n_predictions",
     )

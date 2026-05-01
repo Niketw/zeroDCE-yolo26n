@@ -35,7 +35,8 @@ def main():
     print("  PHASE 3 — Fine-Tuning YOLO26n on BDD100K")
     print("=" * 70)
     print(f"  epochs=100, imgsz=736, optimizer=MuSGD, patience=50")
-    print(f"  hsv_v=0.1, mixup=0.05, batch=16, device={device}\n")
+    print(f"  hsv_v=0.1, mixup=0.05, batch=64 (16/GPU × 4), workers=16")
+    print(f"  device={device}\n")
 
     results = model.train(
         data=yaml_path,
@@ -45,7 +46,9 @@ def main():
         patience=50,
         hsv_v=0.1,
         mixup=0.05,
-        batch=16,
+        batch=64,
+        workers=16,
+        nbs=64,
         project="bdd_tuning",
         name="yolo26n_run",
         device=device,

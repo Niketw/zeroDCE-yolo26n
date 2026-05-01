@@ -25,8 +25,9 @@ def main():
     print(f"\n→ Loading trained model from {WEIGHTS} …")
     model = YOLO(WEIGHTS)
 
-    print(f"→ Running validation on {YAML_PATH} …\n")
-    results = model.val(data=YAML_PATH)
+    print(f"→ Running validation on {YAML_PATH} …")
+    print(f"  workers=16, device=0\n")
+    results = model.val(data=YAML_PATH, workers=16, device=0)
 
     # Extract key metrics
     print("\n" + "=" * 60)

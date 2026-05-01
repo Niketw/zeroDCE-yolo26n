@@ -17,8 +17,13 @@ import glob
 import zipfile
 import tarfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import multiprocessing
 from tqdm import tqdm
 import yaml
+
+# Number of parallel workers — tuned for Xeon Gold + 256 GB RAM
+NUM_WORKERS = 16
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +110,24 @@ def _download_dataset() -> str:
 # Step 2 – Organise images & labels into local project tree
 # ---------------------------------------------------------------------------
 
+def _copy_single_item(args):
+    """Copy a single file/directory — designed for use inside a thread pool."""
+    s, d = args
+    try:
+        if os.path.isdir(s):
+            shutil.copytree(s, d, dirs_exist_ok=True)
+        else:
+            shutil.copy2(s, d)
+    except Exception as e:
+        return f"  ⚠  Could not copy {s} → {d}: {e}"
+    return None
+
+
 def _copy_tree(src: str, dst: str, desc: str = ""):
     """
     Copy an entire directory tree from *src* into *dst*, skipping
-    segmentation-related files/folders and any archives.
+    segmentation-related files/folders.  Uses a ThreadPool with
+    NUM_WORKERS threads for I/O-bound parallel copying.
     """
     if not os.path.isdir(src):
         print(f"  ⚠  Source not found, skipping: {src}")
@@ -116,23 +135,22 @@ def _copy_tree(src: str, dst: str, desc: str = ""):
 
     os.makedirs(dst, exist_ok=True)
 
-    items = list(os.listdir(src))
-    for item in tqdm(items, desc=f"  Copying {desc}", unit="file"):
-        s = os.path.join(src, item)
-        d = os.path.join(dst, item)
-
-        # Skip segmentation artefacts
+    # Build work list (skip segmentation artefacts)
+    work = []
+    for item in os.listdir(src):
         lower = item.lower()
         if "seg" in lower or "drivable" in lower or "lane" in lower:
             continue
+        work.append((os.path.join(src, item), os.path.join(dst, item)))
 
-        try:
-            if os.path.isdir(s):
-                shutil.copytree(s, d, dirs_exist_ok=True)
-            else:
-                shutil.copy2(s, d)
-        except Exception as e:
-            print(f"  ⚠  Could not copy {s} → {d}: {e}")
+    print(f"  Copying {desc} ({len(work)} items) with {NUM_WORKERS} threads …")
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as pool:
+        futures = {pool.submit(_copy_single_item, w): w for w in work}
+        for fut in tqdm(as_completed(futures), total=len(futures),
+                        desc=f"  Copying {desc}", unit="file"):
+            err = fut.result()
+            if err:
+                print(err)
 
 
 def _organise_files(cache_path: str):
@@ -263,9 +281,73 @@ def _cleanup_archives():
 # Step 4 – Convert JSON labels → YOLO .txt (with class filtering)
 # ---------------------------------------------------------------------------
 
+def _process_frame(args):
+    """
+    Convert a single BDD100K frame dict into a YOLO .txt file.
+    Designed for use inside a ProcessPoolExecutor.
+
+    Returns (kept_count, skipped_count).
+    """
+    frame, output_dir = args
+    image_name = frame.get("name", "")
+    txt_name = os.path.splitext(image_name)[0] + ".txt"
+    txt_path = os.path.join(output_dir, txt_name)
+
+    lines = []
+    kept = 0
+    skipped = 0
+    labels = frame.get("labels", [])
+    if labels is None:
+        labels = []
+
+    for label in labels:
+        category = label.get("category", "")
+        if category not in CLASS_MAP:
+            skipped += 1
+            continue
+
+        box2d = label.get("box2d")
+        if box2d is None:
+            skipped += 1
+            continue
+
+        x1 = float(box2d["x1"])
+        y1 = float(box2d["y1"])
+        x2 = float(box2d["x2"])
+        y2 = float(box2d["y2"])
+
+        # Clamp to image bounds
+        x1 = max(0.0, min(x1, IMAGE_WIDTH))
+        y1 = max(0.0, min(y1, IMAGE_HEIGHT))
+        x2 = max(0.0, min(x2, IMAGE_WIDTH))
+        y2 = max(0.0, min(y2, IMAGE_HEIGHT))
+
+        # Skip degenerate boxes
+        if x2 <= x1 or y2 <= y1:
+            skipped += 1
+            continue
+
+        # Normalised YOLO coordinates
+        x_center = ((x1 + x2) / 2.0) / IMAGE_WIDTH
+        y_center = ((y1 + y2) / 2.0) / IMAGE_HEIGHT
+        w = (x2 - x1) / IMAGE_WIDTH
+        h = (y2 - y1) / IMAGE_HEIGHT
+
+        class_id = CLASS_MAP[category]
+        lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}")
+        kept += 1
+
+    # Write .txt even if empty (YOLO expects the file for negative samples)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return kept, skipped
+
+
 def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
     """
-    Parse a BDD100K JSON label file and write per-image YOLO .txt files.
+    Parse a BDD100K JSON label file and write per-image YOLO .txt files
+    using a ProcessPoolExecutor with NUM_WORKERS processes.
 
     Each line: class_id x_center y_center width height  (all normalised)
     Only classes present in CLASS_MAP are kept.
@@ -273,6 +355,7 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
     print(f"\n  Converting {split_name} labels → YOLO format …")
     print(f"    Source : {json_path}")
     print(f"    Output : {output_dir}")
+    print(f"    Workers: {NUM_WORKERS}")
 
     try:
         with open(json_path, "r", encoding="utf-8") as f:
@@ -287,60 +370,18 @@ def _convert_json_to_yolo(json_path: str, output_dir: str, split_name: str):
     total_boxes = 0
     skipped_boxes = 0
 
-    for idx, frame in enumerate(tqdm(data, desc=f"    Filtering {split_name} JSON labels", unit="img")):
-        image_name = frame.get("name", "")
-        txt_name = os.path.splitext(image_name)[0] + ".txt"
-        txt_path = os.path.join(output_dir, txt_name)
+    # Build work items: (frame_dict, output_dir)
+    work = [(frame, output_dir) for frame in data]
 
-        lines = []
-        labels = frame.get("labels", [])
-        if labels is None:
-            labels = []
-
-        for label in labels:
-            category = label.get("category", "")
-            if category not in CLASS_MAP:
-                skipped_boxes += 1
-                continue
-
-            box2d = label.get("box2d")
-            if box2d is None:
-                skipped_boxes += 1
-                continue
-
-            x1 = float(box2d["x1"])
-            y1 = float(box2d["y1"])
-            x2 = float(box2d["x2"])
-            y2 = float(box2d["y2"])
-
-            # Clamp to image bounds
-            x1 = max(0.0, min(x1, IMAGE_WIDTH))
-            y1 = max(0.0, min(y1, IMAGE_HEIGHT))
-            x2 = max(0.0, min(x2, IMAGE_WIDTH))
-            y2 = max(0.0, min(y2, IMAGE_HEIGHT))
-
-            # Skip degenerate boxes
-            if x2 <= x1 or y2 <= y1:
-                skipped_boxes += 1
-                continue
-
-            # Normalised YOLO coordinates
-            x_center = ((x1 + x2) / 2.0) / IMAGE_WIDTH
-            y_center = ((y1 + y2) / 2.0) / IMAGE_HEIGHT
-            w = (x2 - x1) / IMAGE_WIDTH
-            h = (y2 - y1) / IMAGE_HEIGHT
-
-            class_id = CLASS_MAP[category]
-            lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}")
-            total_boxes += 1
-
-        # Write .txt even if empty (YOLO expects the file for negative samples)
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-        # Progress breadcrumb every 5 000 images
-        if (idx + 1) % 5000 == 0:
-            print(f"    … processed {idx + 1}/{total_images} images")
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as pool:
+        for kept, skipped in tqdm(
+            pool.map(_process_frame, work, chunksize=256),
+            total=total_images,
+            desc=f"    Filtering {split_name} JSON labels",
+            unit="img",
+        ):
+            total_boxes += kept
+            skipped_boxes += skipped
 
     print(f"  ✓ {split_name}: {total_boxes} boxes kept across {total_images} images "
           f"({skipped_boxes} boxes discarded).")
