@@ -25,13 +25,39 @@ from download import prepare_dataset
 from model import get_model
 
 
+def send_discord_start(trainer):
+    """
+    Callback function to send training start message.
+    Triggered on 'on_train_start'.
+    """
+    WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+    
+    if not WEBHOOK_URL or WEBHOOK_URL == "YOUR_WEBHOOK_URL":
+        return
+        
+    try:
+        embed = {
+            "title": "🚀 Training Started",
+            "description": f"Starting training for {trainer.epochs} epochs.",
+            "color": 3066993  # Green
+        }
+        
+        data = {
+            "content": "Training started!",
+            "embeds": [embed]
+        }
+        
+        requests.post(WEBHOOK_URL, json=data, timeout=10)
+    except Exception as e:
+        print(f"Failed to send Discord webhook (start): {e}")
+
+
 def send_discord_stats(trainer):
     """
     Callback function to send training stats to a Discord webhook.
     Triggered on 'on_train_epoch_end'.
     """
     WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-    USER_ID = os.getenv("DISCORD_USER_ID", "<@YOUR_USER_ID>")
     
     if not WEBHOOK_URL or WEBHOOK_URL == "YOUR_WEBHOOK_URL":
         return
@@ -71,7 +97,7 @@ def send_discord_stats(trainer):
         }
         
         data = {
-            "content": f"{USER_ID} - Epoch update!",
+            "content": "Epoch update!",
             "embeds": [embed]
         }
         
@@ -105,11 +131,44 @@ def main():
         print("  PHASE 2 & 3 — Resuming Training")
         print("=" * 70)
         print(f"  Found interrupted run checkpoint: {last_pt}")
+        
+        # Patch args.yaml in case the run folder was moved (e.g. from runs/ to checkpoints/)
+        # YOLO hardcodes the absolute save_dir in args.yaml. If it doesn't match the current 
+        # physical location, resume=True silently fails and starts from epoch 1.
+        run_dir = os.path.dirname(os.path.dirname(last_pt))  # parent of weights/
+        args_yaml_path = os.path.join(run_dir, "args.yaml")
+        
+        if os.path.isfile(args_yaml_path):
+            import yaml
+            try:
+                with open(args_yaml_path, "r") as f:
+                    args_data = yaml.safe_load(f)
+                
+                # Update the paths to reflect the current real absolute path
+                abs_run_dir = os.path.abspath(run_dir)
+                abs_project_dir = os.path.dirname(abs_run_dir)
+                
+                changed = False
+                if args_data.get("save_dir") != abs_run_dir:
+                    args_data["save_dir"] = abs_run_dir
+                    changed = True
+                if args_data.get("project") != abs_project_dir:
+                    args_data["project"] = abs_project_dir
+                    changed = True
+                    
+                if changed:
+                    with open(args_yaml_path, "w") as f:
+                        yaml.dump(args_data, f)
+                    print(f"  [Fixed] Patched args.yaml with new directory location.")
+            except Exception as e:
+                print(f"  ⚠ Could not patch args.yaml: {e}")
+
         print("  Resuming training...")
         
         # We just need the device setup from get_model
         _, device = get_model()
         model = YOLO(last_pt)
+        model.add_callback("on_train_start", send_discord_start)
         model.add_callback("on_train_epoch_end", send_discord_stats)
         results = model.train(resume=True, device=device)
     else:
@@ -117,6 +176,7 @@ def main():
         print("  PHASE 2 — Model Initialisation")
         print("=" * 70)
         model, device = get_model()
+        model.add_callback("on_train_start", send_discord_start)
         model.add_callback("on_train_epoch_end", send_discord_stats)
 
         print("\n" + "=" * 70)
