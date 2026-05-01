@@ -1,0 +1,5 @@
+ultralytics
+kagglehub
+pandas
+tqdm
+pyyaml
